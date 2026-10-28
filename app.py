@@ -1,6 +1,11 @@
 """
-GLOBAL TRIO CLOSING DECIMAL ENGINE - 15-MIN PRE-CLOSE (FIXED FEEDS)
-Strictly freezes numbers 15 minutes before respective market closing.
+GLOBAL TRIO CLOSING DECIMAL ENGINE
+- South Korea: KOSPI (^KS11)
+- Germany: DAX (^GDAXI)
+- Taiwan: TAIEX (^TWII)
+
+Dual Data Pipeline: Google Finance (Live Primary) + Yahoo Finance (Historical & Fallback)
+Model: VWAP (+/-7) + Price (+/-7) -> ~15-28 tightly clustered numbers per index.
 """
 
 import streamlit as st
@@ -8,196 +13,214 @@ import pandas as pd
 import numpy as np
 import requests
 import re
+import json
 import yfinance as yf
 import pytz
 from datetime import datetime
 
 st.set_page_config(
-    page_title="Global 15-Min Decimal Engine",
+    page_title="Global Trio Decimal Engine",
     page_icon="🌐",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-IST = pytz.timezone("Asia/Kolkata")
-now_ist = datetime.now(IST)
-
+# -------------------------------------------------------------
+# TIMEZONE & INDEX DEFINITIONS
+# -------------------------------------------------------------
 INDICES = {
     "Taiwan (TAIEX)": {
         "symbol_yf": "^TWII",
-        "gf_urls": [
-            "https://www.google.com/finance/quote/TPE:TAIEX",
-            "https://www.google.com/finance/quote/.TWII:INDEX"
-        ],
-        "close_ist": "11:00 AM",
-        "cutoff_ist_hour": 10,
-        "cutoff_ist_min": 45,
-        "cutoff_label": "10:45 AM IST (15m पहले)",
-        "currency": "TWD"
+        "symbol_gf": "TPE:TAIEX",
+        "timezone": "Asia/Taipei",
+        "close_local": "13:30",
+        "close_ist": "11:00 AM IST",
+        "currency": "TWD",
+        "desc": "Taiwan Stock Exchange Capitalization Weighted Stock Index"
     },
     "South Korea (KOSPI)": {
         "symbol_yf": "^KS11",
-        "gf_urls": [
-            "https://www.google.com/finance/quote/KOSPI:INDEXKRX",
-            "https://www.google.com/finance/quote/KRX:KOSPI"
-        ],
-        "close_ist": "12:00 PM",
-        "cutoff_ist_hour": 11,
-        "cutoff_ist_min": 45,
-        "cutoff_label": "11:45 AM IST (15m पहले)",
-        "currency": "KRW"
+        "symbol_gf": "KRX:KOSPI",
+        "timezone": "Asia/Seoul",
+        "close_local": "15:30",
+        "close_ist": "12:00 PM IST",
+        "currency": "KRW",
+        "desc": "Korea Composite Stock Price Index"
     },
     "Germany (DAX)": {
         "symbol_yf": "^GDAXI",
-        "gf_urls": [
-            "https://www.google.com/finance/quote/DAX:INDEXDB"
-        ],
-        "close_ist": "10:00 PM",
-        "cutoff_ist_hour": 21,
-        "cutoff_ist_min": 45,
-        "cutoff_label": "09:45 PM IST (15m पहले)",
-        "currency": "EUR"
+        "symbol_gf": "INDEXDB:DAX",
+        "timezone": "Europe/Berlin",
+        "close_local": "17:30",
+        "close_ist": "10:00 PM IST",
+        "currency": "EUR",
+        "desc": "Deutscher Aktienindex (DAX 40)"
     }
 }
 
+# -------------------------------------------------------------
+# MODEL FUNCTIONS (STRICTLY UNCHANGED)
+# -------------------------------------------------------------
 def extract_dec(price: float) -> int:
     return int(f"{price:.2f}".split(".")[1])
 
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-def fetch_live_price_google(urls: list):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+# -------------------------------------------------------------
+# DUAL DATA PIPELINE (GOOGLE FINANCE + YAHOO FINANCE)
+# -------------------------------------------------------------
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_dual_stream_data(sym_yf: str, sym_gf: str, tz_name: str):
+    """
+    Combines Google Finance (Ultra-Fast Live Ticks) with
+    Yahoo Finance (Full Intraday Structure & Historical Bar Baseline).
+    """
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "*/*"
     }
-    for u in urls:
-        try:
-            r = requests.get(u, headers=headers, timeout=4)
-            if r.status_code == 200:
-                m = re.search(r'data-last-price="([0-9.,]+)"', r.text)
-                if not m:
-                    m = re.search(r'class="YMlKec fxKbKc">([0-9.,]+)<', r.text)
-                if m:
-                    val = float(m.group(1).replace(",", ""))
-                    if val > 0:
-                        return val
-        except Exception:
-            pass
-    return None
 
-@st.cache_data(ttl=20, show_spinner=False)
-def load_data_and_compute(meta: dict):
-    # 1. Fetch Google Finance live / settlement price
-    gf_price = fetch_live_price_google(meta["gf_urls"])
+    live_gf_price = None
+    # 1. Fast Live Scraping from Google Finance
+    try:
+        url_gf = f"https://www.google.com/finance/quote/{sym_gf}"
+        resp_gf = requests.get(url_gf, headers=req_headers, timeout=4)
+        if resp_gf.status_code == 200:
+            m = re.search(r'data-last-price="([0-9.,]+)"', resp_gf.text)
+            if m:
+                live_gf_price = float(m.group(1).replace(",", ""))
+    except Exception:
+        pass
 
-    # 2. Fetch Historical Bars via Yahoo Finance with multi-interval fallback
+    # 2. Yahoo Finance Intraday Feed
     df_yf = pd.DataFrame()
-    t = yf.Ticker(meta["symbol_yf"])
-    for interval in ["1m", "2m", "5m"]:
-        try:
-            df_cand = t.history(period="5d", interval=interval)
-            if not df_cand.empty and len(df_cand) >= 5:
-                df_yf = df_cand
-                break
-        except Exception:
-            pass
+    try:
+        t = yf.Ticker(sym_yf)
+        df_yf = t.history(period="1d", interval="1m")
+        if df_yf.empty or len(df_yf) < 5:
+            df_yf = t.history(period="5d", interval="1m")
+    except Exception:
+        pass
 
-    target_price = None
-    target_vwap = None
-    source_used = "YFINANCE"
+    target_tz = pytz.timezone(tz_name)
 
     if not df_yf.empty:
         if df_yf.index.tz is None:
-            df_yf.index = df_yf.index.tz_localize("UTC").tz_convert(IST)
+            df_yf.index = df_yf.index.tz_localize("UTC").tz_convert(target_tz)
         else:
-            df_yf.index = df_yf.index.tz_convert(IST)
+            df_yf.index = df_yf.index.tz_convert(target_tz)
 
         last_date = df_yf.index[-1].date()
-        df_today = df_yf[df_yf.index.date == last_date].copy()
+        df_session = df_yf[df_yf.index.date == last_date].copy()
+        df_session["Time"] = df_session.index.strftime("%H:%M")
 
-        cut_h = meta["cutoff_ist_hour"]
-        cut_m = meta["cutoff_ist_min"]
+        # Fusion: If Google Finance price is available and fresher, append/calibrate latest bar
+        if live_gf_price is not None and live_gf_price > 0:
+            last_yf_price = float(df_session.iloc[-1]["Close"])
+            # If Google Finance has updated tick
+            if abs(live_gf_price - last_yf_price) > 0.001:
+                cur_local_time = datetime.now(target_tz).strftime("%H:%M")
+                new_row = pd.DataFrame([{
+                    "Open": live_gf_price,
+                    "High": live_gf_price,
+                    "Low": live_gf_price,
+                    "Close": live_gf_price,
+                    "Volume": 1.0,
+                    "Time": cur_local_time
+                }], index=[datetime.now(target_tz)])
+                df_session = pd.concat([df_session, new_row])
+                return df_session, "DUAL_FUSION (Google Live + YF Historical)"
 
-        # Filter bars at or before the 15-minute pre-close cutoff
-        mask = (df_today.index.hour < cut_h) | ((df_today.index.hour == cut_h) & (df_today.index.minute <= cut_m))
-        df_cut = df_today[mask]
+        return df_session, "YFINANCE_BACKUP"
 
-        if not df_cut.empty:
-            target_price = float(df_cut.iloc[-1]["Close"])
-            win = df_cut.tail(15)
-            typ_p = (win["High"] + win["Low"] + win["Close"]) / 3.0
-            vol = win["Volume"]
-            target_vwap = (typ_p * vol).sum() / vol.sum() if vol.sum() > 0 else typ_p.mean()
-            source_used = f"YFINANCE_HISTORICAL ({interval} bars)"
-        else:
-            # If session is already over and bars started after cutoff, use earliest bar of closing session
-            target_price = float(df_today.iloc[0]["Close"])
-            target_vwap = target_price
-            source_used = "YFINANCE_SESSION_SETTLE"
+    # 3. Emergency Single Tick fallback from Google Finance
+    if live_gf_price is not None:
+        cur_local_time = datetime.now(target_tz).strftime("%H:%M")
+        df_single = pd.DataFrame([{
+            "Open": live_gf_price,
+            "High": live_gf_price,
+            "Low": live_gf_price,
+            "Close": live_gf_price,
+            "Volume": 1.0,
+            "Time": cur_local_time
+        }], index=[datetime.now(target_tz)])
+        return df_single, "GOOGLE_FINANCE_LIVE"
 
-    # Fallback to Google Finance price if YF failed completely
-    if target_price is None or target_price <= 0:
-        if gf_price and gf_price > 0:
-            target_price = gf_price
-            target_vwap = gf_price
-            source_used = "GOOGLE_FINANCE_LIVE"
+    return None, "डेटा उपलब्ध नहीं है"
 
-    if target_price is None or target_price <= 0:
+def compute_index_model(df_session):
+    if df_session is None or df_session.empty:
         return None
 
-    dec_p = extract_dec(target_price)
-    dec_v = extract_dec(target_vwap)
+    last_bar = df_session.iloc[-1]
+    p_last = float(last_bar["Close"])
+    dec_p = extract_dec(p_last)
+    timestamp_last = df_session.index[-1]
+
+    # Pre-close VWAP calculation (last 20 bars or window)
+    window = df_session.tail(20)
+    typ_p = (window["High"] + window["Low"] + window["Close"]) / 3.0
+    vol = window["Volume"]
+    calc_vwap = (typ_p * vol).sum() / vol.sum() if vol.sum() > 0 else typ_p.mean()
+    dec_vwap = extract_dec(calc_vwap)
 
     band_p = get_band(dec_p, 7)
-    band_v = get_band(dec_v, 7)
+    band_v = get_band(dec_vwap, 7)
+
+    combined_basket = sorted(list(band_p.union(band_v)))
+    prime_core = sorted(list(band_p.intersection(band_v)))
 
     return {
-        "price": target_price,
+        "price": p_last,
         "dec_price": dec_p,
-        "vwap": target_vwap,
-        "dec_vwap": dec_v,
-        "combined": sorted(list(band_p.union(band_v))),
-        "prime": sorted(list(band_p.intersection(band_v))),
-        "source": source_used
+        "vwap": calc_vwap,
+        "dec_vwap": dec_vwap,
+        "combined": combined_basket,
+        "prime": prime_core,
+        "timestamp": timestamp_last
     }
 
-st.title("🌐 ग्लोबल इंडेक्स 15-मिनट प्री-क्लोज दशमलव इंजन")
-st.caption("क्लोजिंग से ठीक 15 मिनट पहले का डेटा फ़्रीज़ / लॉक (ताइवान, दक्षिण कोरिया, जर्मनी)")
+# -------------------------------------------------------------
+# APP INTERFACE
+# -------------------------------------------------------------
+st.title("🌐 ग्लोबल इंडेक्स क्लोजिंग दशमलव इंजन")
+st.caption("ताइवान (TAIEX), दक्षिण कोरिया (KOSPI), और जर्मनी (DAX) — डुअल गूगल फाइनेंस + याहू लाइव इंजन")
 
-st.sidebar.header("⚙️ सेटिंग्स")
+st.sidebar.header("⚙️ कंट्रोल पैनल")
 if st.sidebar.button("🔄 तुरंत रिफ्रेश करें"):
     st.cache_data.clear()
     st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.info("""
+**सटीकता वास्तुकला:**
+• **डेटा फ़ीड:** Google Finance (रियल-टाइम टिक) + Yahoo Finance (स्ट्रक्चर्ड हिस्ट्री)
+• **बैंड:** VWAP (±7) + Price (±7)
+• **औसत साइज़:** 15 से 28 नंबर्स प्रति इंडेक्स (हाई स्ट्राइक रेट)
+""")
 
 cols = st.columns(3)
 
 for idx_i, (name, meta) in enumerate(INDICES.items()):
     with cols[idx_i]:
         st.subheader(name)
-        st.caption(f"🔒 कट-ऑफ: **{meta['cutoff_label']}** (क्लोज: {meta['close_ist']})")
+        st.caption(f"🕒 स्थानीय क्लोज: **{meta['close_local']}** | IST: **{meta['close_ist']}**")
 
-        is_locked = (now_ist.hour > meta["cutoff_ist_hour"]) or (
-            now_ist.hour == meta["cutoff_ist_hour"] and now_ist.minute >= meta["cutoff_ist_min"]
-        )
-
-        if is_locked:
-            st.success("🔒 **15 मिनट पहले का डेटा लॉक है**")
-        else:
-            st.warning("⏳ 15 मिनट कट-ऑफ विंडो का इंतज़ार...")
-
-        res = load_data_and_compute(meta)
-
-        if not res:
-            st.error("डेटा लोड नहीं हो सका।")
+        df_data, src = fetch_dual_stream_data(meta["symbol_yf"], meta["symbol_gf"], meta["timezone"])
+        if df_data is None:
+            st.error(f"डेटा लोड नहीं हो सका: {src}")
             continue
 
+        res = compute_index_model(df_data)
+
         st.metric(
-            label=f"15m कट-ऑफ भाव ({meta['currency']})",
+            label=f"अंतिम भाव ({meta['currency']})",
             value=f"{res['price']:,.2f}",
             delta=f"दशमलव: .{res['dec_price']:02d}"
         )
-        st.write(f"• 15m VWAP: **.{res['dec_vwap']:02d}** ({res['vwap']:,.2f})")
-        st.write(f"• डेटा स्रोत: `{res['source']}`")
+        st.write(f"• VWAP: **.{res['dec_vwap']:02d}** ({res['vwap']:,.2f})")
+        st.write(f"• डेटा स्रोत: `{src}`")
 
         st.markdown(f"**🔥 प्राइम कोर ({len(res['prime'])} nos):**")
         if res["prime"]:
@@ -215,3 +238,4 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
             for x in res["combined"]
         ])
         st.markdown(chips_all, unsafe_allow_html=True)
+        st.caption(f"समय टिक: {res['timestamp'].strftime('%H:%M:%S')}")
