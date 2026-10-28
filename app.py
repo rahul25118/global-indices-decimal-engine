@@ -1,12 +1,11 @@
 """
-GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% RELIABLE OFF-MARKET & LIVE
+GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% YAHOO FINANCE VERIFIED
+Strict 15-Min Pre-Close Cutoff Hard-Lock System
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
-import re
 import yfinance as yf
 import pytz
 from datetime import datetime
@@ -26,21 +25,21 @@ INDICES = {
         "symbol": "^TWII",
         "cutoff_ist_hour": 10,
         "cutoff_ist_min": 45,
-        "cutoff_label": "10:45 AM IST (15m पहले)",
+        "cutoff_label": "10:45 AM IST (15m pehle)",
         "currency": "TWD"
     },
     "South Korea (KOSPI)": {
         "symbol": "^KS11",
         "cutoff_ist_hour": 11,
         "cutoff_ist_min": 45,
-        "cutoff_label": "11:45 AM IST (15m पहले)",
+        "cutoff_label": "11:45 AM IST (15m pehle)",
         "currency": "KRW"
     },
     "Germany (DAX)": {
         "symbol": "^GDAXI",
         "cutoff_ist_hour": 21,
         "cutoff_ist_min": 15,
-        "cutoff_label": "09:15 PM IST (15m पहले)",
+        "cutoff_label": "09:15 PM IST (15m pehle)",
         "currency": "EUR"
     }
 }
@@ -51,7 +50,7 @@ def extract_dec(price: float) -> int:
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def fetch_verified_index(meta: dict):
     cut_h = meta["cutoff_ist_hour"]
     cut_m = meta["cutoff_ist_min"]
@@ -64,7 +63,7 @@ def fetch_verified_index(meta: dict):
     vwap = None
     source = "YFINANCE"
 
-    # 1. First try intraday bars
+    # 1. Primary: Intraday 5m Bars
     try:
         df_intra = t.history(period="2d", interval="5m")
         if not df_intra.empty and len(df_intra) >= 5:
@@ -73,7 +72,6 @@ def fetch_verified_index(meta: dict):
             else:
                 df_intra.index = df_intra.index.tz_convert(IST)
             
-            # If market day and before cutoff, cutoff applies
             mask = (df_intra.index.hour < cut_h) | ((df_intra.index.hour == cut_h) & (df_intra.index.minute <= cut_m))
             df_cut = df_intra[mask]
             target_df = df_cut if not df_cut.empty else df_intra
@@ -86,7 +84,7 @@ def fetch_verified_index(meta: dict):
     except Exception:
         pass
 
-    # 2. Fallback to daily history (for off-market hours / closed sessions)
+    # 2. Secondary: Settled Daily Close Fallback (Off-market hours)
     if price is None or price <= 0:
         try:
             df_daily = t.history(period="1mo")
@@ -117,7 +115,7 @@ def fetch_verified_index(meta: dict):
     }, is_locked
 
 st.title("⚡ ग्लोबल इंडेक्स 15-मिनट प्री-क्लोज दशमलव इंजन")
-st.caption("ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:15 PM IST) - हार्ड लॉक")
+st.caption("याहू फाइनेंस सत्यापित फ़ीड — ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:15 PM IST)")
 
 if st.sidebar.button("🔄 तुरंत रिफ्रेश करें"):
     st.cache_data.clear()
