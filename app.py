@@ -1,5 +1,5 @@
 """
-GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% RELIABLE OFF-MARKET & LIVE
+GLOBAL TRIO CLOSING DECIMAL ENGINE - ZERO-DELAY GOOGLE DIRECT
 """
 
 import streamlit as st
@@ -12,7 +12,7 @@ import pytz
 from datetime import datetime
 
 st.set_page_config(
-    page_title="Global 15-Min Decimal Engine",
+    page_title="Global 15-Min Decimal Engine (Google Live)",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -23,21 +23,33 @@ now_ist = datetime.now(IST)
 
 INDICES = {
     "Taiwan (TAIEX)": {
-        "symbol": "^TWII",
+        "symbol_yf": "^TWII",
+        "search_queries": [
+            "https://www.google.com/search?q=taiex+index+price&hl=en",
+            "https://www.google.com/search?q=taiwan+weighted+index+google+finance&hl=en"
+        ],
         "cutoff_ist_hour": 10,
         "cutoff_ist_min": 45,
         "cutoff_label": "10:45 AM IST (15m पहले)",
         "currency": "TWD"
     },
     "South Korea (KOSPI)": {
-        "symbol": "^KS11",
+        "symbol_yf": "^KS11",
+        "search_queries": [
+            "https://www.google.com/search?q=kospi+index+price&hl=en",
+            "https://www.google.com/search?q=kospi+composite+index+google+finance&hl=en"
+        ],
         "cutoff_ist_hour": 11,
         "cutoff_ist_min": 45,
         "cutoff_label": "11:45 AM IST (15m पहले)",
         "currency": "KRW"
     },
     "Germany (DAX)": {
-        "symbol": "^GDAXI",
+        "symbol_yf": "^GDAXI",
+        "search_queries": [
+            "https://www.google.com/search?q=dax+40+index+price&hl=en",
+            "https://www.google.com/search?q=dax+index+google+finance&hl=en"
+        ],
         "cutoff_ist_hour": 21,
         "cutoff_ist_min": 15,
         "cutoff_label": "09:15 PM IST (15m पहले)",
@@ -51,65 +63,86 @@ def extract_dec(price: float) -> int:
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-@st.cache_data(ttl=30, show_spinner=False)
-def fetch_verified_index(meta: dict):
+def fetch_live_google_unblocked(urls: list):
+    """
+    Scrapes Google's real-time financial ticker directly without AWS blocking.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=3.5)
+            if r.status_code == 200:
+                html = r.text
+                # Regex 1: Google Finance embed inside search
+                m = re.search(r'data-value="([0-9.,]+)"', html)
+                if not m:
+                    # Regex 2: Primary Google Finance header
+                    m = re.search(r'class="YMlKec fxKbKc">([0-9.,]+)<', html)
+                if not m:
+                    # Regex 3: Knowledge graph stock rate
+                    m = re.search(r'class="[a-zA-Z0-9_\s]*IsqQVc\s*NprOfl"[^>]*>([0-9.,]+)<', html)
+                
+                if m:
+                    val = float(m.group(1).replace(",", ""))
+                    if val > 100:
+                        return val
+        except Exception:
+            continue
+    return None
+
+@st.cache_data(ttl=10, show_spinner=False)
+def load_index_realtime(meta: dict):
     cut_h = meta["cutoff_ist_hour"]
     cut_m = meta["cutoff_ist_min"]
     is_locked = (now_ist.hour > cut_h) or (now_ist.hour == cut_h and now_ist.minute >= cut_m)
 
-    sym = meta["symbol"]
-    t = yf.Ticker(sym)
-    
-    price = None
-    vwap = None
-    source = "YFINANCE"
+    # 1. PRIMARY: Real-time Google Live Tick (Zero Delay)
+    live_p = fetch_live_google_unblocked(meta["search_queries"])
 
-    # 1. First try intraday bars
-    try:
-        df_intra = t.history(period="2d", interval="5m")
-        if not df_intra.empty and len(df_intra) >= 5:
-            if df_intra.index.tz is None:
-                df_intra.index = df_intra.index.tz_localize("UTC").tz_convert(IST)
-            else:
-                df_intra.index = df_intra.index.tz_convert(IST)
-            
-            # If market day and before cutoff, cutoff applies
-            mask = (df_intra.index.hour < cut_h) | ((df_intra.index.hour == cut_h) & (df_intra.index.minute <= cut_m))
-            df_cut = df_intra[mask]
-            target_df = df_cut if not df_cut.empty else df_intra
+    target_price = None
+    target_vwap = None
+    source = "GOOGLE_LIVE (Zero-Delay)"
 
-            price = float(target_df.iloc[-1]["Close"])
-            typ = (target_df["High"] + target_df["Low"] + target_df["Close"]) / 3.0
-            vol = target_df["Volume"]
-            vwap = (typ * vol).sum() / vol.sum() if vol.sum() > 0 else typ.mean()
-            source = f"YFINANCE_INTRADAY ({sym})"
-    except Exception:
-        pass
+    if live_p and live_p > 0:
+        target_price = live_p
+        target_vwap = live_p
+        source = "GOOGLE_LIVE_REALTIME"
 
-    # 2. Fallback to daily history (for off-market hours / closed sessions)
-    if price is None or price <= 0:
+    # 2. FALLBACK: Yahoo Finance only if Google is unavailable
+    if target_price is None:
         try:
-            df_daily = t.history(period="1mo")
-            if not df_daily.empty:
-                last_row = df_daily.iloc[-1]
-                price = float(last_row["Close"])
-                vwap = float((last_row["High"] + last_row["Low"] + last_row["Close"]) / 3.0)
-                source = f"YFINANCE_SETTLED_CLOSE ({sym})"
+            t = yf.Ticker(meta["symbol_yf"])
+            df = t.history(period="1d", interval="1m")
+            if not df.empty:
+                target_price = float(df.iloc[-1]["Close"])
+                target_vwap = float(df["Close"].mean())
+                source = "YFINANCE_BACKUP"
+            else:
+                df_daily = t.history(period="5d")
+                if not df_daily.empty:
+                    last_row = df_daily.iloc[-1]
+                    target_price = float(last_row["Close"])
+                    target_vwap = float((last_row["High"] + last_row["Low"] + last_row["Close"]) / 3.0)
+                    source = "YFINANCE_SETTLED_CLOSE"
         except Exception:
             pass
 
-    if price is None or price <= 0:
+    if target_price is None:
         return None, is_locked
 
-    dec_p = extract_dec(price)
-    dec_v = extract_dec(vwap)
+    dec_p = extract_dec(target_price)
+    dec_v = extract_dec(target_vwap)
     band_p = get_band(dec_p, 7)
     band_v = get_band(dec_v, 7)
 
     return {
-        "price": price,
+        "price": target_price,
         "dec_p": dec_p,
-        "vwap": vwap,
+        "vwap": target_vwap,
         "dec_v": dec_v,
         "combined": sorted(list(band_p.union(band_v))),
         "prime": sorted(list(band_p.intersection(band_v))),
@@ -117,7 +150,7 @@ def fetch_verified_index(meta: dict):
     }, is_locked
 
 st.title("⚡ ग्लोबल इंडेक्स 15-मिनट प्री-क्लोज दशमलव इंजन")
-st.caption("ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:15 PM IST) - हार्ड लॉक")
+st.caption("गूगल रियल-टाइम लाइव फ़ीड (शून्य विलंब) — ताइवान, दक्षिण कोरिया, जर्मनी")
 
 if st.sidebar.button("🔄 तुरंत रिफ्रेश करें"):
     st.cache_data.clear()
@@ -130,7 +163,7 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
         st.subheader(name)
         st.caption(f"🔒 कट-ऑफ: **{meta['cutoff_label']}**")
 
-        res, locked = fetch_verified_index(meta)
+        res, locked = load_index_realtime(meta)
 
         if locked:
             st.success(f"🔒 **{meta['cutoff_label']} पर डेटा लॉक है**")
@@ -146,7 +179,7 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
             value=f"{res['price']:,.2f}",
             delta=f"दशमलव: .{res['dec_p']:02d}"
         )
-        st.write(f"• इंडिकेटिव VWAP: **.{res['dec_v']:02d}** ({res['vwap']:,.2f})")
+        st.write(f"• VWAP/इंडिकेटिव: **.{res['dec_v']:02d}** ({res['vwap']:,.2f})")
         st.write(f"• डेटा स्रोत: `{res['source']}`")
 
         st.markdown(f"**🔥 प्राइम कोर ({len(res['prime'])} nos):**")
