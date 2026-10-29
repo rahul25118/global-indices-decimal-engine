@@ -1,7 +1,8 @@
 """
-GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% YAHOO FINANCE VERIFIED
-Strict 15-Min Pre-Close Cutoff Hard-Lock System
-DAX Winter Cutoff: 09:45 PM IST (Close: 10:00 PM IST)
+GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% HARD-LOCKED AT CUTOFF
+Taiwan: Hard freeze at 10:45 AM IST
+South Korea: Hard freeze at 11:45 AM IST
+Germany: Hard freeze at 09:45 PM IST
 """
 
 import streamlit as st
@@ -9,38 +10,39 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import pytz
-from datetime import datetime
+from datetime import datetime, time
 
 st.set_page_config(
-    page_title="Global 15-Min Decimal Engine",
-    page_icon="⚡",
+    page_title="Global 15-Min Decimal Engine (Locked)",
+    page_icon="🔒",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 IST = pytz.timezone("Asia/Kolkata")
 now_ist = datetime.now(IST)
+today_date = now_ist.date()
 
 INDICES = {
     "Taiwan (TAIEX)": {
         "symbol": "^TWII",
-        "cutoff_ist_hour": 10,
-        "cutoff_ist_min": 45,
-        "cutoff_label": "10:45 AM IST (15m पहले)",
+        "cutoff_hour": 10,
+        "cutoff_min": 45,
+        "cutoff_label": "10:45 AM IST",
         "currency": "TWD"
     },
     "South Korea (KOSPI)": {
         "symbol": "^KS11",
-        "cutoff_ist_hour": 11,
-        "cutoff_ist_min": 45,
-        "cutoff_label": "11:45 AM IST (15m पहले)",
+        "cutoff_hour": 11,
+        "cutoff_min": 45,
+        "cutoff_label": "11:45 AM IST",
         "currency": "KRW"
     },
     "Germany (DAX)": {
         "symbol": "^GDAXI",
-        "cutoff_ist_hour": 21,
-        "cutoff_ist_min": 45,
-        "cutoff_label": "09:45 PM IST (15m पहले)",
+        "cutoff_hour": 21,
+        "cutoff_min": 45,
+        "cutoff_label": "09:45 PM IST",
         "currency": "EUR"
     }
 }
@@ -51,72 +53,65 @@ def extract_dec(price: float) -> int:
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-@st.cache_data(ttl=20, show_spinner=False)
-def fetch_verified_index(meta: dict):
-    cut_h = meta["cutoff_ist_hour"]
-    cut_m = meta["cutoff_ist_min"]
-    is_locked = (now_ist.hour > cut_h) or (now_ist.hour == cut_h and now_ist.minute >= cut_m)
+def fetch_locked_data(meta: dict):
+    cut_h = meta["cutoff_hour"]
+    cut_m = meta["cutoff_min"]
+    cutoff_time_today = datetime.combine(today_date, time(cut_h, cut_m))
+    cutoff_dt = IST.localize(cutoff_time_today)
+
+    # क्या कट-ऑफ समय बीत चुका है?
+    is_locked = now_ist >= cutoff_dt
 
     sym = meta["symbol"]
     t = yf.Ticker(sym)
-
-    price = None
-    vwap = None
-    source = "YFINANCE"
-
-    # 1. Primary: Intraday 5m Bars
-    try:
-        df_intra = t.history(period="2d", interval="5m")
-        if not df_intra.empty and len(df_intra) >= 5:
-            if df_intra.index.tz is None:
-                df_intra.index = df_intra.index.tz_localize("UTC").tz_convert(IST)
-            else:
-                df_intra.index = df_intra.index.tz_convert(IST)
-
-            mask = (df_intra.index.hour < cut_h) | ((df_intra.index.hour == cut_h) & (df_intra.index.minute <= cut_m))
-            df_cut = df_intra[mask]
-            target_df = df_cut if not df_cut.empty else df_intra
-
-            price = float(target_df.iloc[-1]["Close"])
-            typ = (target_df["High"] + target_df["Low"] + target_df["Close"]) / 3.0
-            vol = target_df["Volume"]
-            vwap = (typ * vol).sum() / vol.sum() if vol.sum() > 0 else typ.mean()
-            source = f"YFINANCE_INTRADAY ({sym})"
-    except Exception:
-        pass
-
-    # 2. Secondary: Settled Daily Close Fallback (Off-market hours)
-    if price is None or price <= 0:
-        try:
-            df_daily = t.history(period="1mo")
-            if not df_daily.empty:
-                last_row = df_daily.iloc[-1]
-                price = float(last_row["Close"])
-                vwap = float((last_row["High"] + last_row["Low"] + last_row["Close"]) / 3.0)
-                source = f"YFINANCE_SETTLED_CLOSE ({sym})"
-        except Exception:
-            pass
-
-    if price is None or price <= 0:
+    
+    # 5 दिन का 5m डेटा ताकि टाइमस्टैम्प पूरी तरह उपलब्ध रहे
+    df = t.history(period="5d", interval="5m")
+    if df.empty:
         return None, is_locked
 
-    dec_p = extract_dec(price)
-    dec_v = extract_dec(vwap)
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC").tz_convert(IST)
+    else:
+        df.index = df.index.tz_convert(IST)
+
+    # अगर कट-ऑफ हो चुका है -> सिर्फ कट-ऑफ टाइमस्टैम्प या उससे पहले की कैंडल्स ही फिल्टर होंगी
+    if is_locked:
+        valid_df = df[df.index <= cutoff_dt]
+    else:
+        valid_df = df
+
+    if valid_df.empty:
+        valid_df = df
+
+    # कट-ऑफ वाले मिनट की अंतिम कैंडल
+    target_row = valid_df.iloc[-1]
+    locked_price = float(target_row["Close"])
+    locked_time_str = valid_df.index[-1].strftime("%I:%M %p IST")
+
+    # अंतिम 15 बार्स का VWAP
+    win = valid_df.tail(15)
+    typ_p = (win["High"] + win["Low"] + win["Close"]) / 3.0
+    vol = win["Volume"]
+    locked_vwap = (typ_p * vol).sum() / vol.sum() if vol.sum() > 0 else typ_p.mean()
+
+    dec_p = extract_dec(locked_price)
+    dec_v = extract_dec(locked_vwap)
     band_p = get_band(dec_p, 7)
     band_v = get_band(dec_v, 7)
 
     return {
-        "price": price,
+        "price": locked_price,
         "dec_p": dec_p,
-        "vwap": vwap,
+        "vwap": locked_vwap,
         "dec_v": dec_v,
         "combined": sorted(list(band_p.union(band_v))),
         "prime": sorted(list(band_p.intersection(band_v))),
-        "source": source
+        "locked_bar_time": locked_time_str
     }, is_locked
 
-st.title("⚡ ग्लोबल इंडेक्स 15-मिनट प्री-क्लोज दशमलव इंजन")
-st.caption("याहू फाइनेंस सत्यापित फ़ीड — ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:45 PM IST)")
+st.title("🔒 ग्लोबल इंडेक्स 15-मिनट कट-ऑफ हार्ड-लॉक इंजन")
+st.caption("ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:45 PM IST)")
 
 if st.sidebar.button("🔄 तुरंत रिफ्रेश करें"):
     st.cache_data.clear()
@@ -127,14 +122,14 @@ cols = st.columns(3)
 for idx_i, (name, meta) in enumerate(INDICES.items()):
     with cols[idx_i]:
         st.subheader(name)
-        st.caption(f"🔒 कट-ऑफ: **{meta['cutoff_label']}**")
+        st.caption(f"कट-ऑफ विंडो: **{meta['cutoff_label']}**")
 
-        res, locked = fetch_verified_index(meta)
+        res, locked = fetch_locked_data(meta)
 
         if locked:
-            st.success(f"🔒 **{meta['cutoff_label']} पर डेटा लॉक है**")
+            st.success(f"🔒 **डेटा स्थायी रूप से लॉक है ({meta['cutoff_label']})**")
         else:
-            st.warning("⏳ 15 मिनट कट-ऑफ विंडो का इंतज़ार...")
+            st.warning(f"⏳ लाइव चल रहा है (कट-ऑफ {meta['cutoff_label']} पर लॉक होगा)")
 
         if not res:
             st.error("डेटा लोड नहीं हो सका।")
@@ -146,7 +141,7 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
             delta=f"दशमलव: .{res['dec_p']:02d}"
         )
         st.write(f"• इंडिकेटिव VWAP: **.{res['dec_v']:02d}** ({res['vwap']:,.2f})")
-        st.write(f"• डेटा स्रोत: `{res['source']}`")
+        st.caption(f"अंतिम लॉक टिक: `{res['locked_bar_time']}`")
 
         st.markdown(f"**🔥 प्राइम कोर ({len(res['prime'])} nos):**")
         if res["prime"]:
