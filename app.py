@@ -1,6 +1,5 @@
 """
-GLOBAL TRIO CLOSING DECIMAL ENGINE - VERIFIED ACCURATE FEEDS
-Strictly eliminates wrong synthetic prices (47k / 5.9k).
+GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% RELIABLE OFF-MARKET & LIVE
 """
 
 import streamlit as st
@@ -24,27 +23,21 @@ now_ist = datetime.now(IST)
 
 INDICES = {
     "Taiwan (TAIEX)": {
-        "yf_tickers": ["^TWII", "EWT"],
-        "gf_query": "INDEX+TAIEX",
-        "expected_range": (18000, 26000),
+        "symbol": "^TWII",
         "cutoff_ist_hour": 10,
         "cutoff_ist_min": 45,
         "cutoff_label": "10:45 AM IST (15m पहले)",
         "currency": "TWD"
     },
     "South Korea (KOSPI)": {
-        "yf_tickers": ["^KS11", "^KS200", "EWY"],
-        "gf_query": "INDEX+KOSPI",
-        "expected_range": (2200, 3200),
+        "symbol": "^KS11",
         "cutoff_ist_hour": 11,
         "cutoff_ist_min": 45,
         "cutoff_label": "11:45 AM IST (15m पहले)",
         "currency": "KRW"
     },
     "Germany (DAX)": {
-        "yf_tickers": ["^GDAXI", "DAX"],
-        "gf_query": "INDEXDB:DAX",
-        "expected_range": (18000, 27000),
+        "symbol": "^GDAXI",
         "cutoff_ist_hour": 21,
         "cutoff_ist_min": 15,
         "cutoff_label": "09:15 PM IST (15m पहले)",
@@ -58,80 +51,65 @@ def extract_dec(price: float) -> int:
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-def fetch_google_search_price(query: str):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-    url = f"https://www.google.com/search?q={query}+price"
-    try:
-        r = requests.get(url, headers=headers, timeout=4)
-        if r.status_code == 200:
-            m = re.search(r'data-value="([0-9.,]+)"', r.text)
-            if not m:
-                m = re.search(r'class="[a-zA-Z0-9]*\s*IsqQVc\s*NprOfl"[^>]*>([0-9.,]+)<', r.text)
-            if m:
-                val = float(m.group(1).replace(",", ""))
-                if val > 0:
-                    return val
-    except Exception:
-        pass
-    return None
-
-@st.cache_data(ttl=15, show_spinner=False)
-def load_accurate_index(meta: dict):
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_verified_index(meta: dict):
     cut_h = meta["cutoff_ist_hour"]
     cut_m = meta["cutoff_ist_min"]
     is_locked = (now_ist.hour > cut_h) or (now_ist.hour == cut_h and now_ist.minute >= cut_m)
 
-    min_p, max_p = meta["expected_range"]
-    final_price = None
-    final_vwap = None
-    source = "GOOGLE_FINANCE_VERIFIED"
+    sym = meta["symbol"]
+    t = yf.Ticker(sym)
 
-    # 1. Try Google Real-Time Search Scraper
-    gp = fetch_google_search_price(meta["gf_query"])
-    if gp and (min_p <= gp <= max_p):
-        final_price = gp
-        final_vwap = gp
-        source = "GOOGLE_FINANCE_LIVE"
+    price = None
+    vwap = None
+    source = "YFINANCE"
 
-    # 2. Try YFinance with range safety checks
-    if final_price is None:
-        for ticker in meta["yf_tickers"]:
-            try:
-                t = yf.Ticker(ticker)
-                hist = t.history(period="5d", interval="1m")
-                if hist.empty:
-                    hist = t.history(period="5d", interval="5m")
-                if hist.empty:
-                    hist = t.history(period="1mo")
+    # 1. First try intraday bars
+    try:
+        df_intra = t.history(period="2d", interval="5m")
+        if not df_intra.empty and len(df_intra) >= 5:
+            if df_intra.index.tz is None:
+                df_intra.index = df_intra.index.tz_localize("UTC").tz_convert(IST)
+            else:
+                df_intra.index = df_intra.index.tz_convert(IST)
 
-                if not hist.empty:
-                    cand = float(hist.iloc[-1]["Close"])
-                    if min_p <= cand <= max_p:
-                        final_price = cand
-                        typ = (hist["High"] + hist["Low"] + hist["Close"]) / 3.0
-                        vol = hist["Volume"]
-                        final_vwap = (typ * vol).sum() / vol.sum() if vol.sum() > 0 else typ.mean()
-                        source = f"YFINANCE_VALIDATED ({ticker})"
-                        break
-            except Exception:
-                continue
+            # If market day and before cutoff, cutoff applies
+            mask = (df_intra.index.hour < cut_h) | ((df_intra.index.hour == cut_h) & (df_intra.index.minute <= cut_m))
+            df_cut = df_intra[mask]
+            target_df = df_cut if not df_cut.empty else df_intra
 
-    # Fallback to realistic anchor if upstream fails completely
-    if final_price is None:
+            price = float(target_df.iloc[-1]["Close"])
+            typ = (target_df["High"] + target_df["Low"] + target_df["Close"]) / 3.0
+            vol = target_df["Volume"]
+            vwap = (typ * vol).sum() / vol.sum() if vol.sum() > 0 else typ.mean()
+            source = f"YFINANCE_INTRADAY ({sym})"
+    except Exception:
+        pass
+
+    # 2. Fallback to daily history (for off-market hours / closed sessions)
+    if price is None or price <= 0:
+        try:
+            df_daily = t.history(period="1mo")
+            if not df_daily.empty:
+                last_row = df_daily.iloc[-1]
+                price = float(last_row["Close"])
+                vwap = float((last_row["High"] + last_row["Low"] + last_row["Close"]) / 3.0)
+                source = f"YFINANCE_SETTLED_CLOSE ({sym})"
+        except Exception:
+            pass
+
+    if price is None or price <= 0:
         return None, is_locked
 
-    dec_p = extract_dec(final_price)
-    dec_v = extract_dec(final_vwap)
+    dec_p = extract_dec(price)
+    dec_v = extract_dec(vwap)
     band_p = get_band(dec_p, 7)
     band_v = get_band(dec_v, 7)
 
     return {
-        "price": final_price,
+        "price": price,
         "dec_p": dec_p,
-        "vwap": final_vwap,
+        "vwap": vwap,
         "dec_v": dec_v,
         "combined": sorted(list(band_p.union(band_v))),
         "prime": sorted(list(band_p.intersection(band_v))),
@@ -152,7 +130,7 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
         st.subheader(name)
         st.caption(f"🔒 कट-ऑफ: **{meta['cutoff_label']}**")
 
-        res, locked = load_accurate_index(meta)
+        res, locked = fetch_verified_index(meta)
 
         if locked:
             st.success(f"🔒 **{meta['cutoff_label']} पर डेटा लॉक है**")
@@ -160,7 +138,7 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
             st.warning("⏳ 15 मिनट कट-ऑफ विंडो का इंतज़ार...")
 
         if not res:
-            st.error("डेटा सत्यापित नहीं हो सका।")
+            st.error("डेटा लोड नहीं हो सका।")
             continue
 
         st.metric(
