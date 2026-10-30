@@ -1,8 +1,5 @@
 """
-GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% HARD-LOCKED AT CUTOFF
-Taiwan: Hard freeze at 10:45 AM IST
-South Korea: Hard freeze at 11:45 AM IST
-Germany: Hard freeze at 09:45 PM IST
+GLOBAL TRIO CLOSING DECIMAL ENGINE - ABSOLUTE SESSION-STATE HARD-LOCK
 """
 
 import streamlit as st
@@ -13,7 +10,7 @@ import pytz
 from datetime import datetime, time
 
 st.set_page_config(
-    page_title="Global 15-Min Decimal Engine (Locked)",
+    page_title="Global 15-Min Decimal Engine (Permanent Lock)",
     page_icon="🔒",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -47,74 +44,91 @@ INDICES = {
     }
 }
 
+# Session State Dictionary initialize karein permanent locking ke liye
+if "locked_records" not in st.session_state:
+    st.session_state.locked_records = {}
+
 def extract_dec(price: float) -> int:
     return int(f"{price:.2f}".split(".")[1])
 
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-def fetch_locked_data(meta: dict):
+def get_market_data(name: str, meta: dict):
     cut_h = meta["cutoff_hour"]
     cut_m = meta["cutoff_min"]
-    cutoff_time_today = datetime.combine(today_date, time(cut_h, cut_m))
-    cutoff_dt = IST.localize(cutoff_time_today)
 
-    # क्या कट-ऑफ समय बीत चुका है?
-    is_locked = now_ist >= cutoff_dt
+    # Check karein kya cut-off time guzar chuka hai
+    is_time_up = (now_ist.hour > cut_h) or (now_ist.hour == cut_h and now_ist.minute >= cut_m)
 
+    # RULE 1: Agar cut-off ho chuka hai aur memory mein pehle se lock hai, wahi exact data return karo (Zero Re-calculation)
+    if is_time_up and name in st.session_state.locked_records:
+        return st.session_state.locked_records[name], True
+
+    # RULE 2: Data fetch karo
     sym = meta["symbol"]
     t = yf.Ticker(sym)
-
-    # 5 दिन का 5m डेटा ताकि टाइमस्टैम्प पूरी तरह उपलब्ध रहे
     df = t.history(period="5d", interval="5m")
+
     if df.empty:
-        return None, is_locked
-
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC").tz_convert(IST)
+        # Fallback daily agar 5m na mile
+        df_daily = t.history(period="5d")
+        if df_daily.empty:
+            return None, is_time_up
+        last_row = df_daily.iloc[-1]
+        p = float(last_row["Close"])
+        v = float((last_row["High"] + last_row["Low"] + last_row["Close"]) / 3.0)
+        lock_str = "Daily Close Fallback"
     else:
-        df.index = df.index.tz_convert(IST)
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC").tz_convert(IST)
+        else:
+            df.index = df.index.tz_convert(IST)
 
-    # अगर कट-ऑफ हो चुका है -> सिर्फ कट-ऑफ टाइमस्टैम्प या उससे पहले की कैंडल्स ही फिल्टर होंगी
-    if is_locked:
-        valid_df = df[df.index <= cutoff_dt]
-    else:
-        valid_df = df
+        if is_time_up:
+            # Cut-off time tak strictly filter karo
+            cutoff_dt = IST.localize(datetime.combine(today_date, time(cut_h, cut_m)))
+            df_filtered = df[df.index <= cutoff_dt]
+            valid_df = df_filtered if not df_filtered.empty else df
+        else:
+            valid_df = df
 
-    if valid_df.empty:
-        valid_df = df
+        target_row = valid_df.iloc[-1]
+        p = float(target_row["Close"])
+        lock_str = valid_df.index[-1].strftime("%I:%M %p IST")
 
-    # कट-ऑफ वाले मिनट की अंतिम कैंडल
-    target_row = valid_df.iloc[-1]
-    locked_price = float(target_row["Close"])
-    locked_time_str = valid_df.index[-1].strftime("%I:%M %p IST")
+        # Indicative VWAP calculation (last 15 bars)
+        win = valid_df.tail(15)
+        typ_p = (win["High"] + win["Low"] + win["Close"]) / 3.0
+        vol = win["Volume"]
+        v = (typ_p * vol).sum() / vol.sum() if vol.sum() > 0 else typ_p.mean()
 
-    # अंतिम 15 बार्स का VWAP
-    win = valid_df.tail(15)
-    typ_p = (win["High"] + win["Low"] + win["Close"]) / 3.0
-    vol = win["Volume"]
-    locked_vwap = (typ_p * vol).sum() / vol.sum() if vol.sum() > 0 else typ_p.mean()
-
-    dec_p = extract_dec(locked_price)
-    dec_v = extract_dec(locked_vwap)
+    dec_p = extract_dec(p)
+    dec_v = extract_dec(v)
     band_p = get_band(dec_p, 7)
     band_v = get_band(dec_v, 7)
 
-    return {
-        "price": locked_price,
+    record = {
+        "price": p,
         "dec_p": dec_p,
-        "vwap": locked_vwap,
+        "vwap": v,
         "dec_v": dec_v,
         "combined": sorted(list(band_p.union(band_v))),
         "prime": sorted(list(band_p.intersection(band_v))),
-        "locked_bar_time": locked_time_str
-    }, is_locked
+        "locked_bar_time": lock_str
+    }
 
-st.title("🔒 ग्लोबल इंडेक्स 15-मिनट कट-ऑफ हार्ड-लॉक इंजन")
+    # RULE 3: Agar cut-off time ho chuka hai, toh record ko session_state mein hamesha ke liye daal do
+    if is_time_up:
+        st.session_state.locked_records[name] = record
+
+    return record, is_time_up
+
+st.title("🔒 ग्लोबल इंडेक्स 15-मिनट कट-ऑफ परमानेंट लॉक इंजन")
 st.caption("ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:45 PM IST)")
 
+# Sidebar refresh button: Yeh cache ko clear karega par locked session ko nahi chhedega
 if st.sidebar.button("🔄 तुरंत रिफ्रेश करें"):
-    st.cache_data.clear()
     st.rerun()
 
 cols = st.columns(3)
@@ -122,9 +136,9 @@ cols = st.columns(3)
 for idx_i, (name, meta) in enumerate(INDICES.items()):
     with cols[idx_i]:
         st.subheader(name)
-        st.caption(f"कट-ऑफ विंडो: **{meta['cutoff_label']}**")
+        st.caption(f"कट-ऑफ समय: **{meta['cutoff_label']}**")
 
-        res, locked = fetch_locked_data(meta)
+        res, locked = get_market_data(name, meta)
 
         if locked:
             st.success(f"🔒 **डेटा स्थायी रूप से लॉक है ({meta['cutoff_label']})**")
