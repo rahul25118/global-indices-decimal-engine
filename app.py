@@ -1,6 +1,7 @@
 """
 GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% YAHOO FINANCE VERIFIED
 Strict 15-Min Pre-Close Cutoff Hard-Lock System
+DAX Winter Cutoff: 09:45 PM IST (Close: 10:00 PM IST)
 """
 
 import streamlit as st
@@ -25,21 +26,21 @@ INDICES = {
         "symbol": "^TWII",
         "cutoff_ist_hour": 10,
         "cutoff_ist_min": 45,
-        "cutoff_label": "10:45 AM IST (15m pehle)",
+        "cutoff_label": "10:45 AM IST (15m पहले)",
         "currency": "TWD"
     },
     "South Korea (KOSPI)": {
         "symbol": "^KS11",
         "cutoff_ist_hour": 11,
         "cutoff_ist_min": 45,
-        "cutoff_label": "11:45 AM IST (15m pehle)",
+        "cutoff_label": "11:45 AM IST (15m पहले)",
         "currency": "KRW"
     },
     "Germany (DAX)": {
         "symbol": "^GDAXI",
         "cutoff_ist_hour": 21,
-        "cutoff_ist_min": 15,
-        "cutoff_label": "09:15 PM IST (15m pehle)",
+        "cutoff_ist_min": 45,
+        "cutoff_label": "09:45 PM IST (15m पहले)",
         "currency": "EUR"
     }
 }
@@ -115,7 +116,7 @@ def fetch_verified_index(meta: dict):
     }, is_locked
 
 st.title("⚡ ग्लोबल इंडेक्स 15-मिनट प्री-क्लोज दशमलव इंजन")
-st.caption("याहू फाइनेंस सत्यापित फ़ीड — ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:15 PM IST)")
+st.caption("याहू फाइनेंस सत्यापित फ़ीड — ताइवान (10:45 AM), दक्षिण कोरिया (11:45 AM), जर्मनी (09:45 PM IST)")
 
 if st.sidebar.button("🔄 तुरंत रिफ्रेश करें"):
     st.cache_data.clear()
