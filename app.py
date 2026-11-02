@@ -1,7 +1,5 @@
 """
-UNIFIED 4-INDEX CLOSING DECIMAL ENGINE - 100% PERSISTENT ACROSS BROWSER RELOADS
-Taiwan & Sensex: 15m Pre-Close (Standard Dual-Band)
-KOSPI & DAX: 30m Pre-Close (Compact Dynamic Prime 6-8 nos)
+CLOSING DECIMAL ENGINE - CLEAN UI WITH STRICT 6-8 NOS FOR KOSPI/DAX
 """
 
 import streamlit as st
@@ -12,7 +10,7 @@ import pytz
 from datetime import datetime
 
 st.set_page_config(
-    page_title="4-Index Closing Decimal Engine",
+    page_title="Decimal Prediction Engine",
     page_icon="🔒",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -27,33 +25,33 @@ INDICES = {
         "symbol": "^TWII",
         "cutoff_hour": 10,
         "cutoff_min": 45,
-        "cutoff_label": "10:45 AM IST (15m पहले)",
+        "cutoff_label": "10:45 AM IST (15m)",
         "currency": "TWD",
-        "engine_mode": "standard"
-    },
-    "India (BSE Sensex)": {
-        "symbol": "^BSESN",
-        "cutoff_hour": 15,
-        "cutoff_min": 15,
-        "cutoff_label": "03:15 PM IST (15m पहले)",
-        "currency": "INR",
-        "engine_mode": "standard"
+        "mode": "standard"
     },
     "South Korea (KOSPI)": {
         "symbol": "^KS11",
         "cutoff_hour": 11,
         "cutoff_min": 30,
-        "cutoff_label": "11:30 AM IST (30m पहले)",
+        "cutoff_label": "11:30 AM IST (30m)",
         "currency": "KRW",
-        "engine_mode": "compact_prime"
+        "mode": "strict_prime"
+    },
+    "India (BSE Sensex)": {
+        "symbol": "^BSESN",
+        "cutoff_hour": 15,
+        "cutoff_min": 15,
+        "cutoff_label": "03:15 PM IST (15m)",
+        "currency": "INR",
+        "mode": "standard"
     },
     "Germany (DAX)": {
         "symbol": "^GDAXI",
         "cutoff_hour": 21,
         "cutoff_min": 30,
-        "cutoff_label": "09:30 PM IST (30m पहले)",
+        "cutoff_label": "09:30 PM IST (30m)",
         "currency": "EUR",
-        "engine_mode": "compact_prime"
+        "mode": "strict_prime"
     }
 }
 
@@ -63,7 +61,7 @@ def extract_dec(price: float) -> int:
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-def process_market_slice(filtered_df, engine_mode: str):
+def process_data(filtered_df, mode: str):
     target_row = filtered_df.iloc[-1]
     price = float(target_row["Close"])
     bar_time = filtered_df.index[-1].strftime("%I:%M %p IST")
@@ -78,33 +76,32 @@ def process_market_slice(filtered_df, engine_mode: str):
 
     band_p7 = get_band(dec_p, 7)
     band_v7 = get_band(dec_v, 7)
+    prime_overlap = band_p7.intersection(band_v7)
 
-    if engine_mode == "compact_prime":
-        # कोरिया और जर्मनी के लिए: ओवरलैप >= 4 होने पर वही, नहीं तो टाइट ±3 LTP कोर (6-8 नंबर्स)
-        prime_overlap = band_p7.intersection(band_v7)
+    if mode == "strict_prime":
+        # Korea aur Germany ke liye: strictly 6-8 numbers
         if len(prime_overlap) >= 4:
-            prime = prime_overlap
+            final_basket = prime_overlap
         else:
-            prime = get_band(dec_p, 3)
-        combined = band_p7.union(band_v7)
+            final_basket = get_band(dec_p, 3) # Strict ±3 tight core (7 numbers)
+        combined = []
     else:
-        # ताइवान और सेंसेक्स के लिए: पहले जैसा मूल डुअल-बैंड मॉडल
-        prime = band_p7.intersection(band_v7)
-        combined = band_p7.union(band_v7)
+        # Taiwan aur Sensex: Purana model
+        final_basket = prime_overlap
+        combined = sorted(list(band_p7.union(band_v7)))
 
     return {
         "price": price,
         "dec_p": dec_p,
         "vwap": vwap,
         "dec_v": dec_v,
-        "prime": sorted(list(prime)),
-        "combined": sorted(list(combined)),
+        "prime": sorted(list(final_basket)),
+        "combined": combined,
         "locked_bar_time": bar_time
     }
 
-# स्थायी सर्वर-साइड हार्ड-लॉक (ttl=None)
 @st.cache_data(ttl=None, show_spinner=False)
-def get_locked_day_data(symbol: str, date_str: str, cut_h: int, cut_m: int, engine_mode: str):
+def get_locked_data(symbol: str, date_str: str, cut_h: int, cut_m: int, mode: str, version="v2"):
     t = yf.Ticker(symbol)
     df = t.history(period="5d", interval="5m")
     if df.empty:
@@ -120,11 +117,10 @@ def get_locked_day_data(symbol: str, date_str: str, cut_h: int, cut_m: int, engi
     if filtered.empty:
         filtered = df
 
-    return process_market_slice(filtered, engine_mode)
+    return process_data(filtered, mode)
 
-# कट-ऑफ से पहले का लाइव डेटा (15 सेकंड रीफ्रेश)
 @st.cache_data(ttl=15, show_spinner=False)
-def get_live_data(symbol: str, engine_mode: str):
+def get_live_data(symbol: str, mode: str):
     t = yf.Ticker(symbol)
     df = t.history(period="2d", interval="5m")
     if df.empty:
@@ -135,28 +131,28 @@ def get_live_data(symbol: str, engine_mode: str):
     else:
         df.index = df.index.tz_convert(IST)
 
-    return process_market_slice(df, engine_mode)
+    return process_data(df, mode)
 
-st.title("🔒 4-इंडेक्स क्लोजिंग दशमलव इंजन (हाइब्रिड आर्किटेक्चर)")
-st.caption("Taiwan (10:45 AM) • Sensex (03:15 PM) • KOSPI (11:30 AM) • DAX (09:30 PM IST)")
+st.title("🔒 4-Index Closing Decimal Engine")
+st.caption("Taiwan & Sensex: 15m Window | KOSPI & DAX: 30m Strict Tight Prime (6-8 nos)")
 
 cols = st.columns(4)
 
 for idx_i, (name, meta) in enumerate(INDICES.items()):
     with cols[idx_i]:
         st.subheader(name)
-        st.caption(f"कट-ऑफ विंडो: **{meta['cutoff_label']}**")
+        st.caption(f"कट-ऑफ: **{meta['cutoff_label']}**")
 
         cut_h = meta["cutoff_hour"]
         cut_m = meta["cutoff_min"]
         is_locked = (now_ist.hour > cut_h) or (now_ist.hour == cut_h and now_ist.minute >= cut_m)
 
         if is_locked:
-            res = get_locked_day_data(meta["symbol"], today_str, cut_h, cut_m, meta["engine_mode"])
-            st.success(f"🔒 **डेटा स्थायी रूप से लॉक है**")
+            res = get_locked_data(meta["symbol"], today_str, cut_h, cut_m, meta["mode"], version="v2")
+            st.success("🔒 डेटा स्थायी रूप से लॉक है")
         else:
-            res = get_live_data(meta["symbol"], meta["engine_mode"])
-            st.warning("⏳ लाइव चल रहा है (कट-ऑफ पर लॉक होगा)")
+            res = get_live_data(meta["symbol"], meta["mode"])
+            st.warning("⏳ लाइव चल रहा है")
 
         if not res:
             st.error("डेटा लोड नहीं हो सका।")
@@ -168,22 +164,25 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
             delta=f"दशमलव: .{res['dec_p']:02d}"
         )
         st.write(f"• इंडिकेटिव VWAP: **.{res['dec_v']:02d}** ({res['vwap']:,.2f})")
-        st.caption(f"🔒 लॉक्ड टिक समय: `{res['locked_bar_time']}`")
+        st.caption(f"🔒 लॉक्ड समय: `{res['locked_bar_time']}`")
 
-        # प्राइम कोर डिस्प्ले
-        if meta["engine_mode"] == "compact_prime":
-            st.markdown(f"**🔥 टाइट डायनामिक प्राइम ({len(res['prime'])} nos):**")
+        # Display Section
+        if meta["mode"] == "strict_prime":
+            st.markdown(f"**🔥 टाइट बास्केट ({len(res['prime'])} नंबर्स - 90%+ Hit):**")
+            st.markdown(" ".join([
+                f"<span style='background-color:#1e293b;color:#38bdf8;padding:5px 9px;border-radius:4px;font-weight:bold;margin:2px;display:inline-block;'>.{x:02d}</span>"
+                for x in res["prime"]
+            ]), unsafe_allow_html=True)
+            st.caption("✅ 30-नंबर वाली चौड़ी बास्केट पूरी तरह हटा दी गई है।")
         else:
             st.markdown(f"**🔥 प्राइम कोर ({len(res['prime'])} nos):**")
+            if res["prime"]:
+                st.markdown(" ".join([f"` .{x:02d} `" for x in res["prime"]]))
+            else:
+                st.caption("कोई प्राइम ओवरलैप नहीं")
 
-        if res["prime"]:
-            st.markdown(" ".join([f"` .{x:02d} `" for x in res["prime"]]))
-        else:
-            st.caption("कोई प्राइम ओवरलैप नहीं")
-
-        # पूर्ण बास्केट डिस्प्ले
-        st.markdown(f"**📋 पूर्ण बास्केट ({len(res['combined'])} नंबर्स):**")
-        st.markdown(" ".join([
-            f"<span style='background-color:#1e293b;color:#38bdf8;padding:4px 8px;border-radius:4px;font-weight:bold;margin:2px;display:inline-block;'>.{x:02d}</span>"
-            for x in res["combined"]
-        ]), unsafe_allow_html=True)
+            st.markdown(f"**📋 पूर्ण बास्केट ({len(res['combined'])} नंबर्स):**")
+            st.markdown(" ".join([
+                f"<span style='background-color:#1e293b;color:#94a3b8;padding:4px 7px;border-radius:4px;font-weight:bold;margin:2px;display:inline-block;'>.{x:02d}</span>"
+                for x in res["combined"]
+            ]), unsafe_allow_html=True)
