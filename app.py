@@ -1,5 +1,6 @@
 """
-GLOBAL TRIO CLOSING DECIMAL ENGINE - 100% PERSISTENT ACROSS BROWSER RELOADS
+UNIFIED 4-INDEX CLOSING DECIMAL ENGINE - 100% PERSISTENT ACROSS BROWSER RELOADS
+Indices: Taiwan (10:45 AM), South Korea (11:45 AM), BSE Sensex (03:15 PM), Germany (09:45 PM IST)
 """
 
 import streamlit as st
@@ -10,10 +11,10 @@ import pytz
 from datetime import datetime
 
 st.set_page_config(
-    page_title="Global 15-Min Decimal Engine (Permanent Freeze)",
+    page_title="Global + Sensex Decimal Engine (Hard-Locked)",
     page_icon="🔒",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -35,6 +36,13 @@ INDICES = {
         "cutoff_label": "11:45 AM IST",
         "currency": "KRW"
     },
+    "India (BSE Sensex)": {
+        "symbol": "^BSESN",
+        "cutoff_hour": 15,
+        "cutoff_min": 15,
+        "cutoff_label": "03:15 PM IST",
+        "currency": "INR"
+    },
     "Germany (DAX)": {
         "symbol": "^GDAXI",
         "cutoff_hour": 21,
@@ -50,7 +58,7 @@ def extract_dec(price: float) -> int:
 def get_band(center_dec: int, half_size: int = 7) -> set:
     return {(center_dec + k) % 100 for k in range(-half_size, half_size + 1)}
 
-# कट-ऑफ के बाद का डेटा सर्वर पर हमेशा के लिए फ्रीज (ttl=None)
+# कट-ऑफ के बाद सर्वर मेमोरी में स्थायी लॉक (ttl=None)
 @st.cache_data(ttl=None, show_spinner=False)
 def get_locked_day_data(symbol: str, date_str: str, cut_h: int, cut_m: int):
     t = yf.Ticker(symbol)
@@ -92,7 +100,7 @@ def get_locked_day_data(symbol: str, date_str: str, cut_h: int, cut_m: int):
         "locked_bar_time": bar_time
     }
 
-# कट-ऑफ से पहले का लाइव डेटा (सिर्फ 15 सेकंड का कैश)
+# कट-ऑफ से पहले का लाइव डेटा (15 सेकंड कैश)
 @st.cache_data(ttl=15, show_spinner=False)
 def get_live_data(symbol: str):
     t = yf.Ticker(symbol)
@@ -129,10 +137,10 @@ def get_live_data(symbol: str):
         "locked_bar_time": bar_time
     }
 
-st.title("🔒 15-मिनट कट-ऑफ परमानेंट लॉक इंजन")
-st.caption("ताइवान (10:45 AM) • दक्षिण कोरिया (11:45 AM) • जर्मनी (09:45 PM IST)")
+st.title("🔒 4-इंडेक्स क्लोजिंग डेसीमल इंजन (हार्ड-लॉक्ड)")
+st.caption("ताइवान (10:45 AM) • दक्षिण कोरिया (11:45 AM) • भारत सेंसेक्स (03:15 PM) • जर्मनी डैक्स (09:45 PM IST)")
 
-cols = st.columns(3)
+cols = st.columns(4)
 
 for idx_i, (name, meta) in enumerate(INDICES.items()):
     with cols[idx_i]:
@@ -144,11 +152,9 @@ for idx_i, (name, meta) in enumerate(INDICES.items()):
         is_locked = (now_ist.hour > cut_h) or (now_ist.hour == cut_h and now_ist.minute >= cut_m)
 
         if is_locked:
-            # सर्वर के परमानेंट मेमोरी कैश से डेटा उठाएगा (रीलोड करने पर भी नहीं बदलेगा)
             res = get_locked_day_data(meta["symbol"], today_str, cut_h, cut_m)
             st.success(f"🔒 **डेटा स्थायी रूप से लॉक है ({meta['cutoff_label']})**")
         else:
-            # कट-ऑफ से पहले लाइव चलेगा
             res = get_live_data(meta["symbol"])
             st.warning(f"⏳ लाइव चल रहा है (कट-ऑफ {meta['cutoff_label']} पर लॉक होगा)")
 
